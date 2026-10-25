@@ -1,0 +1,8 @@
+{
+  "realms": ["eu", "na"],
+  "watch": [
+    { "item": "emberstone", "max_price": 3 },
+    { "item": "gold_fleck", "max_price": 30, "min_quantity": 1 },
+    { "item": "tool1_*_steel_sword_*", "max_price": 10 }
+  ]
+}
