@@ -2,6 +2,8 @@
   "realms": ["na"],
   "watch": [
     { "item": "ember_core", "max_price": 1000 },
+    { "item": "star_iron", "max_price": 1000000000 },
+    { "item": "star_iron_ingot", "max_price": 1000000000 },
     { "item": "blacksteel_ingot", "max_price": 1000 }
   ]
 }
