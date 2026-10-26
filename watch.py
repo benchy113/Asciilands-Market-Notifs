@@ -15,6 +15,7 @@ import fnmatch
 import json
 import os
 import sys
+import time
 import urllib.request
 
 API = {
@@ -30,26 +31,28 @@ def fetch(url):
         return json.load(r)
 
 
-def cheapest(data, pattern, min_qty):
-    """Cheapest matching offer across all regions, or None.
+def matching_offers(data, pattern, max_price, min_qty):
+    """Every offer matching pattern at or below max_price.
 
     pattern supports * wildcards, e.g. "tool1_*_steel_sword_*".
     """
-    best = None
+    found = []
     for region in data.get("regions", []):
         for o in region.get("offers", []):
             if not fnmatch.fnmatch(o["item_id"], pattern):
                 continue
-            if o["quantity"] < min_qty:
+            if o["quantity"] < min_qty or o["price_each"] > max_price:
                 continue
-            if best is None or o["price_each"] < best["price"]:
-                best = {
-                    "price": o["price_each"],
-                    "quantity": o["quantity"],
-                    "region": region["zone_name"],
-                    "stall": o["stall"],
-                }
-    return best
+            found.append({
+                "item_id": o["item_id"],
+                "price": o["price_each"],
+                "quantity": o["quantity"],
+                "region": region["zone_name"],
+                "zone_id": region["zone_id"],
+                "stall": o["stall"],
+            })
+    found.sort(key=lambda f: f["price"])
+    return found
 
 
 def send_discord(url, text):
@@ -116,7 +119,7 @@ def main():
             print(f"[{realm}] fetch failed: {e}", file=sys.stderr)
             errors += 1
             for k, v in state.items():
-                if k.startswith(realm + ":"):
+                if k.startswith(realm + "|"):
                     new_state[k] = v
             continue
 
@@ -124,23 +127,23 @@ def main():
             pattern = rule["item"]
             max_price = rule["max_price"]
             min_qty = rule.get("min_quantity", 1)
-            key = f"{realm}:{pattern}"
 
-            found = cheapest(data, pattern, min_qty)
-            if not found or found["price"] > max_price:
-                continue  # not below threshold; state resets so it can alert again later
-
-            last = state.get(key)
-            new_state[key] = found["price"]
-            # Alert on first hit, or if the price has dropped further since the last alert.
-            if last is None or found["price"] < last:
-                s = found["stall"]
-                notify(
-                    f"[{realm.upper()}] {pattern}: {found['price']}g each "
-                    f"(x{found['quantity']}) in {found['region']} "
-                    f"@ stall ({s['x']:.0f}, {s['z']:.0f}). Your limit: {max_price}g.",
-                    args.dry_run,
-                )
+            for f in matching_offers(data, pattern, max_price, min_qty):
+                s = f["stall"]
+                # One entry per listing. Quantity is NOT part of the key, so
+                # partial sales don't re-alert, but restocking does.
+                key = f"{realm}|{f['item_id']}|{f['zone_id']}|{s['x']:.0f},{s['z']:.0f}|{f['price']}"
+                new_state[key] = f["quantity"]
+                last_qty = state.get(key)
+                if last_qty is None or f["quantity"] > last_qty:
+                    notify(
+                        f"[{realm.upper()}] {pattern}: {f['price']}g each "
+                        f"(x{f['quantity']}) in {f['region']} "
+                        f"@ stall ({s['x']:.0f}, {s['z']:.0f}). Your limit: {max_price}g.",
+                        args.dry_run,
+                    )
+                    if not args.dry_run:
+                        time.sleep(0.5)  # be gentle with Discord's rate limit
 
     if not args.dry_run:
         with open(STATE_FILE, "w") as f:
