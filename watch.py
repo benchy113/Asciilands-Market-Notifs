@@ -31,8 +31,15 @@ def fetch(url):
         return json.load(r)
 
 
+def parse_limit(value):
+    """A price limit in config.json. Missing, null, "unlimited" or "any" all mean any price."""
+    if value is None or (isinstance(value, str) and value.strip().lower() in ("", "unlimited", "any", "none", "no limit")):
+        return float("inf")
+    return float(value)
+
+
 def matching_offers(data, pattern, max_price, min_qty):
-    """Every offer matching pattern at or below max_price.
+    """Every offer matching pattern at or below max_price (float("inf") = any price).
 
     pattern supports * wildcards, e.g. "tool1_*_steel_sword_*".
     """
@@ -45,7 +52,9 @@ def matching_offers(data, pattern, max_price, min_qty):
                 continue
             found.append({
                 "item_id": o["item_id"],
-                "price": o["price_each"],
+                "price": o["price_each"],  # per unit
+                "lot_size": int(o.get("lot_size") or 1),  # some items only sell in bundles
+                "price_per_lot": o.get("price_per_lot"),
                 "quantity": o["quantity"],
                 "region": region["zone_name"],
                 "zone_id": region["zone_id"],
@@ -53,6 +62,14 @@ def matching_offers(data, pattern, max_price, min_qty):
             })
     found.sort(key=lambda f: f["price"])
     return found
+
+
+def price_text(f):
+    """'600g each', or for bundles '75g per 4 (18.75g each)'."""
+    each = f"{f['price']:.2f}".rstrip("0").rstrip(".")
+    if f["lot_size"] > 1 and f["price_per_lot"] is not None:
+        return f"{f['price_per_lot']:g}g per {f['lot_size']} ({each}g each)"
+    return f"{each}g each"
 
 
 def send_discord(url, text):
@@ -125,21 +142,28 @@ def main():
 
         for rule in config["watch"]:
             pattern = rule["item"]
-            max_price = rule["max_price"]
+            max_price = parse_limit(rule.get("max_price"))
             min_qty = rule.get("min_quantity", 1)
+            limit_text = "No price limit." if max_price == float("inf") else f"Your limit: {max_price:g}g."
 
             for f in matching_offers(data, pattern, max_price, min_qty):
-                s = f["stall"]
+                s = f["stall"]  # None when the listing has no stall position
                 # One entry per listing. Quantity is NOT part of the key, so
-                # partial sales don't re-alert, but restocking does.
-                key = f"{realm}|{f['item_id']}|{f['zone_id']}|{s['x']:.0f},{s['z']:.0f}|{f['price']}"
+                # partial sales don't re-alert, but restocking does. (The key is only an
+                # identifier. It keeps the older x,z form so existing alerts aren't repeated.)
+                spot = f"{s['x']:.0f},{s['z']:.0f}" if s else "nostall"
+                key = f"{realm}|{f['item_id']}|{f['zone_id']}|{spot}|{f['price']}"
                 new_state[key] = f["quantity"]
                 last_qty = state.get(key)
                 if last_qty is None or f["quantity"] > last_qty:
+                    # For wildcard rules, show the real item name that matched (unless it's long gear ids).
+                    label = f["item_id"] if "*" in pattern and len(f["item_id"]) <= 40 else pattern
+                    # x and y are metres inside the hex (y = north). z is altitude, so it isn't shown.
+                    where = f"stall (x {s['x']:.0f}, y {s['y']:.0f} in the hex)" if s else "stall position unknown"
                     notify(
-                        f"[{realm.upper()}] {pattern}: {f['price']}g each "
+                        f"[{realm.upper()}] {label}: {price_text(f)} "
                         f"(x{f['quantity']}) in {f['region']} "
-                        f"@ stall ({s['x']:.0f}, {s['z']:.0f}). Your limit: {max_price}g.",
+                        f"@ {where}. {limit_text}",
                         args.dry_run,
                     )
                     if not args.dry_run:
